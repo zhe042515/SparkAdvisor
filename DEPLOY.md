@@ -10,7 +10,7 @@
 ## 1. 前置条件
 
 - 构建使用 JDK 21；CLI 产物兼容 Java 8 运行时。History Server 插件运行在 SHS 当前 JVM 中。
-- Spark 3.5.1 / Hadoop 运行时 classpath。
+- Spark 3.5.6 / Hadoop 运行时 classpath。
 - 构建机器能访问 Maven Central。
 - 集群侧能访问 event log 所在 HDFS 路径。
 - Kerberos 环境按现有集群约定初始化：
@@ -73,7 +73,7 @@ export SPARK_DIST_CLASSPATH="$SPARK_DIST_CLASSPATH:/path/to/sparkadvisor-ui-plug
 
 ### 2.3 配置 JDK 9+ module opens
 
-Spark 3.5.1 在 JDK 9+ 上回放 event log 时可能会反射访问 `java.base` 内部包，SHS 进程需要增加以下 JVM 参数。Java 8 不支持也不需要这些参数。不要放到 `spark.history.ui.*` 配置里，应加到 SHS 启动 JVM 参数，例如 `SPARK_DAEMON_JAVA_OPTS`：
+Spark 3.5.6 在 JDK 9+ 上回放 event log 时可能会反射访问 `java.base` 内部包，SHS 进程需要增加以下 JVM 参数。Java 8 不支持也不需要这些参数。不要放到 `spark.history.ui.*` 配置里，应加到 SHS 启动 JVM 参数，例如 `SPARK_DAEMON_JAVA_OPTS`：
 
 ```bash
 export SPARK_DAEMON_JAVA_OPTS="$SPARK_DAEMON_JAVA_OPTS \
@@ -154,7 +154,7 @@ bin/sparkadvisor <subcommand> [options]
 - `kinit -kt /opt/client/keytab/ossuser.keytab ossuser`
 - 拼接集群 Spark/Hadoop classpath
 - 默认添加 `-Xmx4g`，避免 Spark `JsonProtocol` 回放 100MB+ JSON event-log part 时因 JVM 默认堆过小 OOM；可用 `SPARKADVISOR_HEAP` 或 `SPARKADVISOR_JAVA_OPTS` 覆盖
-- 在 JDK 9+ 上添加 Spark 3.5.1 需要的 `--add-opens`；Java 8 下不会添加
+- 在 JDK 9+ 上添加 Spark 3.5.6 需要的 `--add-opens`；Java 8 下不会添加
 
 默认 jar 路径为：
 

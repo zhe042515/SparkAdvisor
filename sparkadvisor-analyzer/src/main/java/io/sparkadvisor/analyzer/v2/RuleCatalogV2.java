@@ -14,7 +14,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-/** Complete stable catalog from docs/rules.md v1.0 (29 S + 18 Q + 2 DQ). */
+/** Stable catalog from docs/rules.md (30 S + 18 Q + 2 DQ). */
 public final class RuleCatalogV2 {
     private RuleCatalogV2() {}
 
@@ -27,6 +27,7 @@ public final class RuleCatalogV2 {
     public static List<MetricRule> queue(){List<MetricRule> out=new ArrayList<MetricRule>();for(MetricRule r:all())if(r.scope()==RuleScope.QUEUE)out.add(r);return Java8Collections.listCopy(out);}
 
     private static void addSqlRules(List<MetricRule> r){
+        r.add(new LimitInitialPartitionsRule());
         r.add(spec("S-01",RuleScope.STAGE,"skew",caps(Capability.BASE_TASK_METRICS),keys("skew.min_tasks","skew.abs_ms","skew.ratio"),(c,t)->
                 c.number("num_tasks")>=t.get("skew.min_tasks")&&c.number("task_duration.max_ms")>=t.get("skew.abs_ms")&&ratio(c.number("task_duration.max_ms"),Math.max(c.number("task_duration.p50_ms"),1000))>=t.get("skew.ratio"),
                 (c,t)->ratio(c.number("task_duration.max_ms"),Math.max(c.number("task_duration.p50_ms"),1000))>=10?Severity.CRITICAL:Severity.WARN,

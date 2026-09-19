@@ -1,6 +1,7 @@
 package io.sparkadvisor.analyzer.v2;
 
 import io.sparkadvisor.core.analyze.SqlAnalysis;
+import io.sparkadvisor.core.analyze.LimitProbeSummary;
 import io.sparkadvisor.core.analyze.StageAnalysis;
 import io.sparkadvisor.core.util.Java8Collections;
 import io.sparkadvisor.core.util.Strings;
@@ -41,6 +42,17 @@ public final class SqlMetricsContextAdapter {
         int failed=0;int retries=0;
         for(StageAnalysis stage:sql.stages()){failed+=stage.failedTaskAttempts();retries+=stage.extraTaskAttempts();}
         sqlBuilder.number("failed_tasks",failed).number("stage_retries",retries);
+        LimitProbeSummary limit = sql.limitProbe();
+        if (limit != null) {
+            sqlBuilder.capability(Capability.LIMIT_PROBE_METRICS)
+                    .number("limit.rounds", limit.rounds())
+                    .number("limit.scanned_partitions", limit.scannedPartitions())
+                    .number("limit.initial_partitions", limit.initialPartitions())
+                    .number("limit.scale_up_factor", limit.scaleUpFactor())
+                    .number("limit.executor_cores", limit.executorCores())
+                    .number("limit.second_round_partitions", limit.secondRoundPartitions())
+                    .attribute("limit.initial_source", limit.initialSource());
+        }
         out.add(sqlBuilder.build());
 
         for(StageAnalysis stage:sql.stages()){

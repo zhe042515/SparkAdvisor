@@ -6,6 +6,7 @@ public enum Capability {
     STAGE_EXECUTOR_METRICS,
     PLAN_METRICS,
     PLAN_TEXT,
+    LIMIT_PROBE_METRICS,
     BASELINE,
     STATEMENT_ID,
     QUEUE_TIMELINE,

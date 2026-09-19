@@ -3,10 +3,10 @@
 | 项 | 值 |
 |---|---|
 | 文档 | 《SparkAdvisor 规则设计》——规则的**单一事实源** |
-| 版本 | v1.0 |
+| 版本 | v1.1，增加 S-30 LIMIT 初始分区建议 |
 | 配套 | 《SparkAdvisor 设计文档》（架构、解析层、指标仓库、报告、CLI、工程结构） |
-| 适用 | Spark 3.5.1 长驻共享查询队列（单 Application，1 Driver + 固定 Executor，每日 01:52 重启，一轮约 22h、数百至上千条 SQL） |
-| 规则总数 | 49 条：S 系列（单 SQL/Stage 级）29 条、Q 系列（队列级）18 条、DQ 系列（数据质量）2 条 |
+| 适用 | Spark 3.5.6 长驻共享查询队列（单 Application，1 Driver + 固定 Executor，每日 01:52 重启，一轮约 22h、数百至上千条 SQL） |
+| 规则总数 | 50 条：S 系列（单 SQL/Stage 级）30 条、Q 系列（队列级）18 条、DQ 系列（数据质量）2 条 |
 
 ---
 
@@ -120,6 +120,7 @@ M2 首批 12 条（⚑）：S-01/03/05/06/07/14/16/21/22 + Q-01/02/09——覆�
 | `STAGE_EXECUTOR_METRICS` | `spark.eventLog.logStageExecutorMetrics=true`（SparkListenerStageExecutorMetrics 事件） | 无 executor/driver 内存峰值，内存类结论降级或跳过 | S-09 · Q-07 · Q-14 · Q-15 |
 | `PLAN_METRICS` | sparkPlanInfo 的 accumulator → 计划节点指标映射（设计文档 §3.4） | 无文件数/字节/行数等计划节点指标 | S-05 · S-06 · S-17 · S-18 · S-25 · S-26 |
 | `PLAN_TEXT` | physicalPlanDescription 原文 | 无法做计划文本字符串匹配 | S-19 · S-29 |
+| `LIMIT_PROBE_METRICS` | 已完成 CollectLimit 的同 RDD 串行探测 Job、逐 Job 配置及核数快照 | 无法可靠识别取数轮次；核数未知时仅提示复核 | S-30 |
 | `BASELINE` | baseline/fingerprint_rollup.jsonl（≥ N 轮历史） | 无历史对照，回归/漂移类不评估（首日必然缺失） | S-22 · Q-18 |
 | `STATEMENT_ID`（关联链） | JobStart 的 jobGroup/自定义 property（设计文档 §3.3，需 validate 首日确认） | 关联率低时单 SQL 维度结论受限，队列维度仍可用 | 全部 S 系列的单 SQL 归属 |
 | 基础 TaskMetrics | TaskEnd（始终可用） | —— | 其余全部规则 |
@@ -298,6 +299,20 @@ M2 首批 12 条（⚑）：S-01/03/05/06/07/14/16/21/22 + Q-01/02/09——覆�
 - 证据：未 codegen 的算子名、该 stage CPU 占比与耗时占比、疑似阻断 codegen 的算子（如非 codegen 友好的 UDF）。
 - 建议：REWRITE 用内建函数替换阻断 codegen 的 UDF / 拆分复杂表达式；明确标注启发式（计划文本解析，见 §9.4），不给 CRITICAL。
 - 层级：REWRITE。
+
+**S-30 LIMIT 初始探测分区过少**（SESSION_SET，依赖 LIMIT_PROBE_METRICS）
+
+- **触发：实际 LIMIT 取数轮次 > 2**；不再增加耗时、占比或至少扫描多少分区等门槛。
+- 输入：当前初始分区数 `I`、实际累计探测分区数 `P`、日志记录的 `scaleUpFactor`（有效值 `F=max(2,配置值)`）、同时在场的 Executor 核数之和 `C`。
+- **建议值：`min(C, max(I+1, ceil(P/(1+F))))`**。`I×(1+F)` 是简单的两轮探测分区预算，`P` 超出此预算时按本次读取规模反推初始值；即使未超出预算，只要实际超过两轮也提示调大。此公式是试验起点，不保证两轮完成或必然加速，不同时修改 scaleUpFactor。
+- 例：批量 `1、4、20`，`P=25,F=4,C=32`，建议 `I=5`；批量 `1、4、20、100`，`P=125,F=4,C=16`，建议 `I=16`。
+- 参数从目标 Job 的属性取实际值，跨轮不一致时不建议。初始值缺失时，可根据已确认取数序列的首批分区数推断并标注来源；scaleUpFactor 缺失时不假设默认值，改用第二轮实际批量作为候选，即 `min(C,max(I+1,第二轮分区数))`。
+- `C` 来自 ExecutorAdded/Removed 维护的在场核数，不用 Task 数、历史累计核数或默认 1 替代；动态变化时取各轮开始所见核数的最小值。无法取得核数时只提示复核，不给数值；`I>=C` 时说明已达上限，不输出更大值或反向降低建议。
+- 轮次按同一 execution、同一终端 RDD 的串行成功 Job 识别，首批与 `I` 一致，累计不超过 RDD 分区数；只对可识别的简单 CollectLimit 取数路径启用。不把 Shuffle、Join、子查询、重试或未完成的 Job 数当轮次。Task 完整性复用现有聚合计数，不新增 Task 明细。
+- 输出：S-30 finding 携带轮次、累计分区、配置及来源、核数上限、候选值；有候选时 WARN/MEDIUM，无可增加空间或核数未知时 INFO。CLI、Live、HTML/JSON 使用现有 Finding/Recommendation 链路。
+- 验证：2/3 轮边界、不同 F、F 下限、缺失配置、核数上限与动态变化、重试/错误归属/不完整任务反例；结束 SQL 在运行中 Application 内仍可评估。
+
+Spark 的下一批也受已返回行数影响，`1+F` 仅用于上述启发式预算，不能解释为所有执行的固定增长轨迹。[Spark 3.5.6 executeTake 源码](https://github.com/apache/spark/blob/v3.5.6/sql/core/src/main/scala/org/apache/spark/sql/execution/SparkPlan.scala)
 
 ### 3.F 稳定性
 
@@ -523,6 +538,7 @@ DQ 规则评估**解析结果本身的可信度**，不参与 score 排序，作
 
 ```yaml
 thresholds:
+  limit:         {max_rounds: 2}                                                               # S-30
   # A 数据分布与并行度
   skew:          {min_tasks: 20, abs_ms: 120000, ratio: 5, bytes_ratio: 8, bytes_abs: 1073741824}   # S-01/S-02
   partitions:    {many_tasks: 2000, tiny_ms: 2000, overhead_ratio: 0.3, huge_bytes: 536870912}       # S-03/S-04
