@@ -1,5 +1,7 @@
 package io.sparkadvisor.ui.live;
 
+import io.sparkadvisor.core.eventlog.EventRetentionPolicy;
+
 import org.apache.spark.SparkConf;
 import org.apache.spark.SparkContext;
 import org.apache.spark.api.plugin.DriverPlugin;
@@ -20,6 +22,17 @@ public final class SparkAdvisorDriverPlugin implements DriverPlugin {
     public static final String LIVE_ENABLED = "spark.sparkadvisor.live.enabled";
     public static final String COLLECT_TASK_INTERVALS =
             "spark.sparkadvisor.live.collectTaskIntervals";
+    public static final String RETAINED_SQL_EXECUTIONS =
+            "spark.sparkadvisor.live.retainedSqlExecutions";
+    public static final String RETAINED_JOBS = "spark.sparkadvisor.live.retainedJobs";
+    public static final String RETAINED_STAGES = "spark.sparkadvisor.live.retainedStages";
+    public static final String RETAINED_TASK_INTERVALS =
+            "spark.sparkadvisor.live.retainedTaskIntervals";
+    public static final String RETAINED_EXECUTOR_EVENTS =
+            "spark.sparkadvisor.live.retainedExecutorEvents";
+    public static final String MAX_DESCRIPTION_CHARS =
+            "spark.sparkadvisor.live.maxDescriptionChars";
+    public static final String MAX_PLAN_CHARS = "spark.sparkadvisor.live.maxPlanChars";
 
     private static final Logger LOG = Logger.getLogger(SparkAdvisorDriverPlugin.class.getName());
 
@@ -36,7 +49,18 @@ public final class SparkAdvisorDriverPlugin implements DriverPlugin {
 
         this.sparkContext = sc;
         boolean collectTaskIntervals = conf.getBoolean(COLLECT_TASK_INTERVALS, false);
-        this.listener = new LiveApplicationStore(collectTaskIntervals);
+        EventRetentionPolicy defaults = EventRetentionPolicy.liveDefaults();
+        EventRetentionPolicy retention = new EventRetentionPolicy(
+                nonNegative(conf, RETAINED_SQL_EXECUTIONS, defaults.completedSqlExecutions()),
+                nonNegative(conf, RETAINED_JOBS, defaults.completedJobs()),
+                nonNegative(conf, RETAINED_STAGES, defaults.completedStages()),
+                nonNegative(conf, RETAINED_TASK_INTERVALS, defaults.taskIntervals()),
+                nonNegative(conf, RETAINED_EXECUTOR_EVENTS, defaults.executorEvents()),
+                defaults.pendingStatementIds(),
+                nonNegative(conf, MAX_DESCRIPTION_CHARS, defaults.descriptionChars()),
+                nonNegative(conf, MAX_PLAN_CHARS, defaults.physicalPlanChars()),
+                false);
+        this.listener = new LiveApplicationStore(collectTaskIntervals, retention);
         // VERIFY@3.5.1: DriverPlugin.init runs before listenerBus.start(), and
         // SparkContext.addSparkListener registers with the shared queue.
         sc.addSparkListener(listener);
@@ -46,7 +70,10 @@ public final class SparkAdvisorDriverPlugin implements DriverPlugin {
             if (uiOption.isDefined()) {
                 SparkUI ui = uiOption.get();
                 ui.attachTab(new LiveSparkAdvisorTab(ui, listener));
-                LOG.info("SparkAdvisor live tab attached to driver Spark UI");
+                LOG.info("SparkAdvisor live tab attached with bounded retention: sql="
+                        + retention.completedSqlExecutions() + ", jobs=" + retention.completedJobs()
+                        + ", stages=" + retention.completedStages() + ", taskIntervals="
+                        + (collectTaskIntervals ? retention.taskIntervals() : 0));
             } else {
                 LOG.warning("SparkAdvisor live UI is enabled but Spark UI is disabled; "
                         + "no tab will be attached");
@@ -71,5 +98,9 @@ public final class SparkAdvisorDriverPlugin implements DriverPlugin {
                 LOG.fine("Ignoring SparkAdvisor listener removal failure during shutdown: " + t);
             }
         }
+    }
+
+    private static int nonNegative(SparkConf conf, String key, int defaultValue) {
+        return Math.max(0, conf.getInt(key, defaultValue));
     }
 }

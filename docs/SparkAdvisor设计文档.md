@@ -612,7 +612,9 @@ spark.plugins=io.sparkadvisor.ui.live.SparkAdvisorSparkPlugin
 spark.sparkadvisor.live.enabled=true
 ```
 
-live 模式通过 Driver listener 增量生成快照，不重放 HDFS event log；如需队列争用估计，额外启用 `spark.sparkadvisor.live.collectTaskIntervals=true`。它是显式 opt-in 的运行中能力，会在生产 Driver 注册插件，因此部署风险、资源预算和回滚策略必须独立评估；默认离线/SHS 路径仍保持零侵入。
+live 模式通过 Driver listener 增量生成快照，不重放 HDFS event log；如需队列争用估计，额外启用 `spark.sparkadvisor.live.collectTaskIntervals=true`。Live 使用有界保留窗口：已完成 Stage 立即固化分位数并释放 t-digest，SQL/Job/Stage/TaskInterval/ExecutorEvent 均有容量上限，SQL 文本与物理计划也限制长度。运行中的对象始终保留；达到上限后淘汰最早的已完成明细并在队列报告中声明降级。该策略使 24 小时、千万 Task 场景的常驻内存不再随 Task 总数线性增长；全天完整分析仍由 event log 离线路径承担。
+
+它是显式 opt-in 的运行中能力，会在生产 Driver 注册插件，因此部署风险、资源预算和回滚策略必须独立评估；默认离线/SHS 路径仍保持零侵入。
 
 ---
 
