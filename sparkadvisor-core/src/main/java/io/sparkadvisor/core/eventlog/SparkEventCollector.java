@@ -34,9 +34,13 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.logging.Logger;
 
 /**
  * A custom {@link SparkListener} (written in Java) that ReplayListenerBus feeds events
@@ -50,8 +54,8 @@ import java.util.Map;
  *       a thin coupling to spark-sql types there. See {@code // VERIFY@3.5.1} markers.</li>
  *   <li><b>Thrift Server events</b> are matched by class name reflectively so we never
  *       hard-depend on hive-thriftserver being present.</li>
- *   <li><b>Memory</b>: per-stage metrics go straight into {@link MetricDistributionBuilder};
- *       individual tasks are never retained.</li>
+ *   <li><b>Memory</b>: per-stage metrics go straight into {@link MetricDistributionBuilder}.
+ *       Live callers can supply finite retention limits; offline replay remains complete.</li>
  *   <li><b>Scala interop</b>: any Scala collections/Options returned by Spark are converted
  *       to Java types here so the rest of core/analyzer never sees Scala.</li>
  * </ul>
@@ -59,6 +63,8 @@ import java.util.Map;
  * <p>Not thread-safe; replay is single-threaded per bus.
  */
 public final class SparkEventCollector extends SparkListener {
+
+    private static final Logger LOG = Logger.getLogger(SparkEventCollector.class.getName());
 
     private static final String SQL_EXEC_START =
             "org.apache.spark.sql.execution.ui.SparkListenerSQLExecutionStart";
@@ -69,6 +75,7 @@ public final class SparkEventCollector extends SparkListener {
 
     private final StatementIdExtractor statementIdExtractor = new StatementIdExtractor();
     private final boolean collectTaskIntervals;
+    private final EventRetentionPolicy retention;
 
     private String appId = "";
     private String appName = "";
@@ -78,22 +85,40 @@ public final class SparkEventCollector extends SparkListener {
     private final Map<String, String> conf = new LinkedHashMap<>();
 
     private final Map<Long, SqlExecBuilder> sqlExecs = new LinkedHashMap<>();
-    private final List<Job> jobs = new ArrayList<>();
-    private final Map<Integer, StageBuilder> stages = new LinkedHashMap<>();
+    private final Map<Integer, Job> jobs = new LinkedHashMap<>();
+    private final Map<Integer, StageBuilder> activeStages = new LinkedHashMap<>();
+    private final Map<Integer, Stage> completedStages = new LinkedHashMap<>();
     private final Map<Integer, Long> stageSqlExecutions = new HashMap<>();
-    private final List<TaskInterval> taskIntervals = new ArrayList<>();
+    private final Deque<TaskInterval> taskIntervals = new ArrayDeque<>();
     private final Deque<String> pendingThriftStatementIds = new ArrayDeque<>();
+    private final Deque<Long> completedSqlOrder = new ArrayDeque<>();
+    private final Deque<Integer> completedJobOrder = new ArrayDeque<>();
+    private final Deque<Integer> completedStageOrder = new ArrayDeque<>();
 
-    private final List<ExecutorEvent> executorEvents = new ArrayList<>();
+    private final Deque<ExecutorEvent> executorEvents = new ArrayDeque<>();
     private final Map<String, Integer> executorCores = new HashMap<>(); // executorId -> cores
     private long activeExecutorCores;
+    private int compactedExecutorCores;
+    private long compactedExecutorTime;
+    private long evictedSqlExecutions;
+    private long evictedJobs;
+    private long evictedStages;
+    private long evictedTaskIntervals;
+    private long evictedExecutorEvents;
+    private boolean truncatedSqlText;
 
     public SparkEventCollector() {
-        this(false);
+        this(false, EventRetentionPolicy.unbounded());
     }
 
     public SparkEventCollector(boolean collectTaskIntervals) {
+        this(collectTaskIntervals, EventRetentionPolicy.unbounded());
+    }
+
+    public SparkEventCollector(boolean collectTaskIntervals, EventRetentionPolicy retention) {
         this.collectTaskIntervals = collectTaskIntervals;
+        if (retention == null) throw new IllegalArgumentException("retention must not be null");
+        this.retention = retention;
     }
 
     // ---- Application lifecycle -------------------------------------------------
@@ -129,7 +154,7 @@ public final class SparkEventCollector extends SparkListener {
         if (!"driver".equals(e.executorId())) {
             activeExecutorCores += cores - (previous == null ? 0L : previous.longValue());
         }
-        executorEvents.add(new ExecutorEvent(e.time(), cores, true));
+        addExecutorEvent(new ExecutorEvent(e.time(), cores, true));
     }
 
     @Override
@@ -138,7 +163,7 @@ public final class SparkEventCollector extends SparkListener {
         Integer cores = executorCores.remove(e.executorId());
         if (cores != null) {
             if (!"driver".equals(e.executorId())) activeExecutorCores -= cores;
-            executorEvents.add(new ExecutorEvent(e.time(), cores, false));
+            addExecutorEvent(new ExecutorEvent(e.time(), cores, false));
         }
     }
 
@@ -150,32 +175,39 @@ public final class SparkEventCollector extends SparkListener {
         Long sqlId = ScalaInterop.sqlExecutionId(e.properties());
         // stageIds: Scala Seq[Object]; convert to Java List<Integer>
         List<Integer> stageIds = ScalaInterop.intSeq(e.stageIds());
-        jobs.add(new Job(e.jobId(), sqlId, stageIds, e.time(), 0L, false, limitProbe(e, sqlId)));
+        jobs.put(e.jobId(), new Job(e.jobId(), sqlId, stageIds, e.time(), 0L, false, limitProbe(e, sqlId)));
         if (sqlId != null) {
             sqlExecs.computeIfAbsent(sqlId, SqlExecBuilder::new).jobIds.add((long) e.jobId());
+            SqlExecBuilder sql = sqlExecs.get(sqlId);
             for (Integer stageId : stageIds) {
-                stageSqlExecutions.putIfAbsent(stageId, sqlId);
+                Long existing = stageSqlExecutions.putIfAbsent(stageId, sqlId);
+                if (existing == null || existing.equals(sqlId)) sql.stageIds.add(stageId);
             }
         }
     }
 
     @Override
     public void onJobEnd(SparkListenerJobEnd e) {
-        for (int i = 0; i < jobs.size(); i++) {
-            Job j = jobs.get(i);
-            if (j.jobId() == e.jobId() && j.completionTime() == 0L) {
-                boolean failed = !e.jobResult().getClass().getName().contains("JobSucceeded");
-                jobs.set(i, new Job(j.jobId(), j.sqlExecutionId(), j.stageIds(),
-                        j.submissionTime(), e.time(), failed, j.limitProbe()));
-                break;
-            }
+        Job j = jobs.get(e.jobId());
+        if (j != null && j.completionTime() == 0L) {
+            boolean failed = !e.jobResult().getClass().getName().contains("JobSucceeded");
+            jobs.put(e.jobId(), new Job(j.jobId(), j.sqlExecutionId(), j.stageIds(),
+                    j.submissionTime(), e.time(), failed, j.limitProbe()));
+            completedJobOrder.addLast(e.jobId());
+            evictCompletedJobs();
         }
     }
 
     @Override
     public void onStageSubmitted(SparkListenerStageSubmitted e) {
         StageInfo info = e.stageInfo();
-        StageBuilder b = stages.computeIfAbsent(info.stageId(), id -> new StageBuilder());
+        completedStages.remove(info.stageId());
+        removeAll(completedStageOrder, Integer.valueOf(info.stageId()));
+        StageBuilder b = activeStages.get(info.stageId());
+        if (b == null || b.attemptId != info.attemptNumber()) {
+            b = new StageBuilder();
+            activeStages.put(info.stageId(), b);
+        }
         b.stageId = info.stageId();
         b.attemptId = info.attemptNumber();              // VERIFY@3.5.1 (attemptNumber vs attemptId)
         b.numTasks = info.numTasks();
@@ -212,15 +244,20 @@ public final class SparkEventCollector extends SparkListener {
     @Override
     public void onStageCompleted(SparkListenerStageCompleted e) {
         StageInfo info = e.stageInfo();
-        StageBuilder b = stages.computeIfAbsent(info.stageId(), id -> new StageBuilder());
+        StageBuilder b = activeStages.computeIfAbsent(info.stageId(), id -> new StageBuilder());
         b.stageId = info.stageId();
         b.numTasks = info.numTasks();
         b.completionTime = ScalaInterop.optLong(info.completionTime());
+        completedStages.put(info.stageId(), b.toStage());
+        activeStages.remove(info.stageId());
+        removeAll(completedStageOrder, Integer.valueOf(info.stageId()));
+        completedStageOrder.addLast(info.stageId());
+        evictCompletedStages();
     }
 
     @Override
     public void onTaskEnd(SparkListenerTaskEnd e) {
-        StageBuilder b = stages.computeIfAbsent(e.stageId(), id -> new StageBuilder());
+        StageBuilder b = activeStages.computeIfAbsent(e.stageId(), id -> new StageBuilder());
         b.taskEndCount++;
         String reason = e.reason() == null ? "" : e.reason().getClass().getName();
         boolean failedAttempt = !reason.contains("Success");
@@ -233,19 +270,19 @@ public final class SparkEventCollector extends SparkListener {
             b.firstTaskLaunch = launch;
         }
         TaskMetrics m = e.taskMetrics();
-        if (collectTaskIntervals) {
+        if (collectTaskIntervals && retention.taskIntervals() > 0) {
             long finish = e.taskInfo().finishTime(); // VERIFY@3.5.1
             if (finish > 0L && launch > 0L && finish >= launch) {
                 long executorRunTimeMs = m == null ? 0L : m.executorRunTime(); // VERIFY@3.5.1
                 long executorCpuTimeNs = m == null ? 0L : m.executorCpuTime(); // VERIFY@3.5.1
                 long jvmGcTimeMs = m == null ? 0L : m.jvmGCTime(); // VERIFY@3.5.1
                 long fetchWaitMs = m == null ? 0L : m.shuffleReadMetrics().fetchWaitTime(); // VERIFY@3.5.1
-                taskIntervals.add(new TaskInterval(
+                taskIntervals.addLast(new TaskInterval(
                         e.taskInfo().taskId(),
                         e.stageId(),
                         e.stageAttemptId(),
                         stageSqlExecutions.get(e.stageId()),
-                        e.taskInfo().executorId(),
+                        retention.retainTaskExecutorId() ? e.taskInfo().executorId() : "",
                         launch,
                         finish,
                         executorRunTimeMs,
@@ -254,6 +291,7 @@ public final class SparkEventCollector extends SparkListener {
                         fetchWaitMs,
                         failedAttempt,
                         e.taskInfo().speculative())); // VERIFY@3.5.1
+                evictTaskIntervals();
             }
         }
         if (m == null) {
@@ -303,8 +341,10 @@ public final class SparkEventCollector extends SparkListener {
         // executionId:Long, description:String, physicalPlanDescription:String, time:Long
         SparkListenerSQLExecutionStart s = SqlEventAccess.sqlExecutionStart(event);
         SqlExecBuilder b = sqlExecs.computeIfAbsent(s.executionId(), SqlExecBuilder::new);
-        b.description = s.description();
-        b.physicalPlanText = s.physicalPlanDescription();
+        b.description = truncate(s.description(), retention.descriptionChars());
+        b.physicalPlanText = truncate(s.physicalPlanDescription(), retention.physicalPlanChars());
+        truncatedSqlText |= length(s.description()) > retention.descriptionChars()
+                || length(s.physicalPlanDescription()) > retention.physicalPlanChars();
         b.startTime = s.time();
         statementIdExtractor.extract(s.description()).ifPresent(id -> b.statementId = id);
         if (b.statementId == null && !pendingThriftStatementIds.isEmpty()) {
@@ -315,9 +355,14 @@ public final class SparkEventCollector extends SparkListener {
     private void handleSqlEnd(SparkListenerEvent event) {
         SparkListenerSQLExecutionEnd s = SqlEventAccess.sqlExecutionEnd(event);
         SqlExecBuilder b = sqlExecs.computeIfAbsent(s.executionId(), SqlExecBuilder::new);
+        boolean firstEnd = b.endTime == 0L;
         b.endTime = s.time();
         // VERIFY@3.5.6: nonempty errorMessage denotes a failed SQL, even if earlier jobs succeeded.
         b.failed = s.errorMessage().isDefined() && !s.errorMessage().get().isEmpty();
+        if (firstEnd) {
+            completedSqlOrder.addLast(s.executionId());
+            evictCompletedSqlExecutions();
+        }
     }
 
     private void handleThriftOpStart(SparkListenerEvent event) {
@@ -339,6 +384,9 @@ public final class SparkEventCollector extends SparkListener {
             }
         }
         pendingThriftStatementIds.addLast(id);
+        while (pendingThriftStatementIds.size() > retention.pendingStatementIds()) {
+            pendingThriftStatementIds.removeFirst();
+        }
     }
 
     // ---- Materialization -------------------------------------------------------
@@ -351,15 +399,127 @@ public final class SparkEventCollector extends SparkListener {
                     b.executionId, b.statementId, b.description, b.physicalPlanText,
                     b.startTime, b.endTime, execIncomplete, Java8Collections.listCopy(b.jobIds), b.failed));
         }
-        List<Stage> stageList = new ArrayList<>();
-        for (StageBuilder b : stages.values()) {
+        List<Stage> stageList = new ArrayList<>(completedStages.values());
+        for (StageBuilder b : activeStages.values()) {
             stageList.add(b.toStage());
         }
+        List<ExecutorEvent> executorEventList = new ArrayList<>();
+        if (compactedExecutorCores > 0) {
+            executorEventList.add(new ExecutorEvent(compactedExecutorTime, compactedExecutorCores, true));
+        }
+        executorEventList.addAll(executorEvents);
         return new ApplicationModel(
                 appId, appName, appStart, appEnd, incomplete,
                 Java8Collections.mapCopy(conf), Java8Collections.listCopy(execList),
-                Java8Collections.listCopy(jobs), Java8Collections.listCopy(stageList),
-                Java8Collections.listCopy(executorEvents), Java8Collections.listCopy(taskIntervals));
+                Java8Collections.listCopy(jobs.values()), Java8Collections.listCopy(stageList),
+                Java8Collections.listCopy(executorEventList), Java8Collections.listCopy(taskIntervals));
+    }
+
+    /** Describes whether the live model has discarded old detail to stay within its budget. */
+    public String retentionSummary() {
+        if (evictedSqlExecutions == 0L && evictedJobs == 0L && evictedStages == 0L
+                && evictedTaskIntervals == 0L && evictedExecutorEvents == 0L
+                && !truncatedSqlText) return "";
+        return "Live retention window discarded old detail: sql=" + evictedSqlExecutions
+                + ", jobs=" + evictedJobs + ", stages=" + evictedStages
+                + ", taskIntervals=" + evictedTaskIntervals
+                + ", executorEvents=" + evictedExecutorEvents
+                + ", sqlTextTruncated=" + truncatedSqlText + ".";
+    }
+
+    private void evictCompletedSqlExecutions() {
+        while (completedSqlOrder.size() > retention.completedSqlExecutions()) {
+            Long executionId = completedSqlOrder.removeFirst();
+            SqlExecBuilder removed = sqlExecs.remove(executionId);
+            if (removed == null) continue;
+            evictedSqlExecutions++;
+            for (Long jobId : removed.jobIds) {
+                Job job = jobs.remove(jobId.intValue());
+                if (job != null) evictedJobs++;
+            }
+            removeStagesForExecution(removed);
+            logEviction("SQL executions", evictedSqlExecutions);
+        }
+    }
+
+    private void removeStagesForExecution(SqlExecBuilder sql) {
+        for (Integer stageId : sql.stageIds) {
+            if (!Long.valueOf(sql.executionId).equals(stageSqlExecutions.get(stageId))) continue;
+            stageSqlExecutions.remove(stageId);
+            activeStages.remove(stageId);
+            if (completedStages.remove(stageId) != null) evictedStages++;
+            removeAll(completedStageOrder, stageId);
+        }
+    }
+
+    private void evictCompletedJobs() {
+        while (completedJobOrder.size() > retention.completedJobs()) {
+            Integer jobId = completedJobOrder.removeFirst();
+            Job removed = jobs.remove(jobId);
+            if (removed != null) {
+                if (removed.sqlExecutionId() != null) {
+                    SqlExecBuilder sql = sqlExecs.get(removed.sqlExecutionId());
+                    if (sql != null) sql.jobIds.remove(Long.valueOf(jobId.longValue()));
+                }
+                evictedJobs++;
+                logEviction("jobs", evictedJobs);
+            }
+        }
+    }
+
+    private void evictCompletedStages() {
+        while (completedStageOrder.size() > retention.completedStages()) {
+            Integer stageId = completedStageOrder.removeFirst();
+            if (completedStages.remove(stageId) != null) {
+                Long sqlId = stageSqlExecutions.remove(stageId);
+                if (sqlId != null) {
+                    SqlExecBuilder sql = sqlExecs.get(sqlId);
+                    if (sql != null) sql.stageIds.remove(stageId);
+                }
+                evictedStages++;
+                logEviction("stages", evictedStages);
+            }
+        }
+    }
+
+    private void evictTaskIntervals() {
+        while (taskIntervals.size() > retention.taskIntervals()) {
+            taskIntervals.removeFirst();
+            evictedTaskIntervals++;
+            logEviction("task intervals", evictedTaskIntervals);
+        }
+    }
+
+    private void addExecutorEvent(ExecutorEvent event) {
+        executorEvents.addLast(event);
+        while (executorEvents.size() > retention.executorEvents()) {
+            ExecutorEvent old = executorEvents.removeFirst();
+            evictedExecutorEvents++;
+            compactedExecutorCores += old.added() ? old.cores() : -old.cores();
+            if (compactedExecutorCores < 0) compactedExecutorCores = 0;
+            compactedExecutorTime = executorEvents.isEmpty() ? old.timeMs() : executorEvents.peekFirst().timeMs();
+        }
+    }
+
+    private static String truncate(String value, int maxChars) {
+        if (value == null || maxChars == 0) return "";
+        return value.length() <= maxChars ? value : value.substring(0, maxChars);
+    }
+
+    private static int length(String value) {
+        return value == null ? 0 : value.length();
+    }
+
+    private static <T> void removeAll(Deque<T> deque, T value) {
+        while (deque.removeFirstOccurrence(value)) {
+            // Stage retries can otherwise leave an old queue entry that evicts the new attempt.
+        }
+    }
+
+    private static void logEviction(String type, long count) {
+        if (count == 1L || (count & (count - 1L)) == 0L) {
+            LOG.info("SparkAdvisor live retention discarded " + count + " old " + type);
+        }
     }
 
     // ---- Mutable builders ------------------------------------------------------
@@ -372,7 +532,8 @@ public final class SparkEventCollector extends SparkListener {
         long startTime = 0L;
         long endTime = 0L;
         boolean failed;
-        final List<Long> jobIds = new ArrayList<>();
+        final Set<Long> jobIds = new LinkedHashSet<>();
+        final Set<Integer> stageIds = new HashSet<>();
 
         SqlExecBuilder(long executionId) {
             this.executionId = executionId;

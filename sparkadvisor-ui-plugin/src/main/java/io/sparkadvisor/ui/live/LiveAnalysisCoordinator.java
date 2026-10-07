@@ -60,6 +60,12 @@ public final class LiveAnalysisCoordinator {
             degradedReason = "Live driver task-interval collection is disabled; contention and "
                     + "resource-occupancy metrics are omitted.";
         }
+        String retentionSummary = store.retentionSummary();
+        if (!retentionSummary.isEmpty()) {
+            degradedReason = degradedReason.isEmpty()
+                    ? retentionSummary
+                    : degradedReason + " " + retentionSummary;
+        }
         QueueAnalysisContext context = new QueueAnalysisContext(
                 snapshotKey(model), true, degradedReason);
         QueueAnalysisResult result = queueAnalyzer.analyze(

@@ -168,7 +168,7 @@ URL 形式：
 --conf spark.sparkadvisor.live.enabled=true
 ```
 
-live 模式通过 driver listener 增量聚合快照，不重放 event log；单 SQL 诊断默认可用。队列页如需资源占用/争用估计，可额外打开 `spark.sparkadvisor.live.collectTaskIntervals=true`。
+live 模式通过 driver listener 增量聚合快照，不重放 event log；单 SQL 诊断默认可用。Live 默认采用有界保留窗口，已完成 Stage 会释放 t-digest，SQL/Job/Stage/ExecutorEvent 和可选 TaskInterval 都有容量限制，适配 24 小时、千万 Task 的长驻应用。队列页如需资源占用/争用估计，可额外打开 `spark.sparkadvisor.live.collectTaskIntervals=true`；此时默认仅保留最近 10 万条 TaskInterval，完整全天分析仍使用 event log。
 
 ## 报告内容
 

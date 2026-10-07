@@ -1,6 +1,7 @@
 package io.sparkadvisor.ui.live;
 
 import io.sparkadvisor.core.eventlog.SparkEventCollector;
+import io.sparkadvisor.core.eventlog.EventRetentionPolicy;
 import io.sparkadvisor.core.model.ApplicationModel;
 
 import org.apache.spark.scheduler.SparkListener;
@@ -29,8 +30,12 @@ public final class LiveApplicationStore extends SparkListener {
     private final boolean collectTaskIntervals;
 
     public LiveApplicationStore(boolean collectTaskIntervals) {
+        this(collectTaskIntervals, EventRetentionPolicy.liveDefaults());
+    }
+
+    public LiveApplicationStore(boolean collectTaskIntervals, EventRetentionPolicy retention) {
         this.collectTaskIntervals = collectTaskIntervals;
-        this.collector = new SparkEventCollector(collectTaskIntervals);
+        this.collector = new SparkEventCollector(collectTaskIntervals, retention);
     }
 
     public synchronized ApplicationModel snapshot() {
@@ -39,6 +44,10 @@ public final class LiveApplicationStore extends SparkListener {
 
     public boolean collectTaskIntervals() {
         return collectTaskIntervals;
+    }
+
+    public synchronized String retentionSummary() {
+        return collector.retentionSummary();
     }
 
     @Override

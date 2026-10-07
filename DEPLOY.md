@@ -137,6 +137,15 @@ URL 形式：
 | 参数 | 默认 | 说明 |
 | --- | --- | --- |
 | `spark.sparkadvisor.live.collectTaskIntervals` | `false` | 是否在 driver 内保留轻量 task interval，用于 live 队列页的资源占用/争用估计。长驻队列可能产生大量 task，默认关闭以控制 driver 内存。单 SQL 诊断不依赖该参数。 |
+| `spark.sparkadvisor.live.retainedSqlExecutions` | `200` | Live 内存中最多保留的已完成 SQL；运行中的 SQL 不受此限制。淘汰 SQL 时同步释放其 Job 与 Stage。 |
+| `spark.sparkadvisor.live.retainedJobs` | `2000` | 最多保留的已完成 Job，防止单条 SQL 产生异常多的轮次。 |
+| `spark.sparkadvisor.live.retainedStages` | `5000` | 最多保留的已完成 Stage。Stage 完成后立即把 t-digest 固化为只读分布并释放构建器。 |
+| `spark.sparkadvisor.live.retainedTaskIntervals` | `100000` | 开启 task interval 后的固定容量；超过后淘汰最早记录，不再随千万级 Task 线性增长。 |
+| `spark.sparkadvisor.live.retainedExecutorEvents` | `4096` | Executor 增删事件容量；更早事件压缩成 core 基线。 |
+| `spark.sparkadvisor.live.maxDescriptionChars` | `16384` | 单条 SQL description 最大字符数。 |
+| `spark.sparkadvisor.live.maxPlanChars` | `65536` | 单条物理计划最大字符数。 |
+
+上述限制只作用于 Live Driver。CLI 与 History Server 的离线 event log 回放仍保留完整数据。Live 页面发生淘汰后会声明当前报告来自保留窗口；全天完整报告应使用 event log 离线生成。
 
 ## 3. 方式二：后台命令使用
 
