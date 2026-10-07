@@ -70,7 +70,8 @@ public final class MetricAggregator {
 
         return new SqlAnalysis(
                 sql.executionId(), sql.statementId(), sql.description(), sql.physicalPlanText(),
-                wall, criticalPath, ideal, deviation, util, taskConcurrency(sql), avgTaskConcurrency(sql), stageAnalyses);
+                wall, criticalPath, ideal, deviation, util, taskConcurrency(sql), avgTaskConcurrency(sql), stageAnalyses,
+                LimitProbeSummary.from(sql, app.jobs(), stagesById));
     }
 
     private int taskConcurrency(SqlExecution sql) {

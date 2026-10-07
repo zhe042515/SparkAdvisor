@@ -68,6 +68,7 @@ public final class RuleThresholdsV2 {
 
     public static RuleThresholdsV2 defaults(){
         Map<String,Double> v=new LinkedHashMap<String,Double>();
+        put(v,"limit.max_rounds",2);
         put(v,"skew.min_tasks",20);put(v,"skew.abs_ms",120000);put(v,"skew.ratio",5);put(v,"skew.bytes_ratio",8);put(v,"skew.bytes_abs",1073741824L);
         put(v,"partitions.many_tasks",2000);put(v,"partitions.tiny_ms",2000);put(v,"partitions.overhead_ratio",0.3);put(v,"partitions.huge_bytes",536870912L);
         put(v,"small_files.scan_files",1000);put(v,"small_files.scan_avg_bytes",8388608L);put(v,"small_files.out_files",500);put(v,"small_files.out_avg_bytes",16777216L);put(v,"small_files.prune_files",5000);

@@ -1,6 +1,8 @@
 # AGENTS.md — SparkAdvisor
 
-本文件为在本仓库工作的 Code Agent（Codex 等）提供工作约定。完整设计见仓库根目录 `SparkAdvisor-design.md`，本文件只列“干活时必须遵守的规则”。
+本文件为在本仓库工作的 Code Agent（Codex 等）提供工作约定。完整设计见 `docs/SparkAdvisor设计文档.md`。
+
+当前在 `main` 沿用原架构和全部旧规则，新增 S-30 LIMIT 初始分区建议，规范见 `docs/rules.md`；不实施精简分支的架构。目标 Spark 版本改为 **3.5.6**，新接入 API 使用 `VERIFY@3.5.6` 并编译验证。下文 3.5.1 的已核对记录保留为历史参考，不能视为 3.5.6 的验证声明。
 
 ## 1. 项目一句话
 

@@ -22,6 +22,17 @@ public final class ReportText {
     private static final Map<String, String> ZH = new LinkedHashMap<String, String>();
 
     static {
+        put("LIMIT required more than two probe rounds.", "LIMIT 取数超过两轮，可尝试增大初始探测分区数。");
+        put("Try a larger first batch, capped by observed executor cores; compare the next execution.",
+                "在已观测 Executor 总核数上限内增大首批分区数，并对比下一次执行。");
+        put("Executor core count is unknown; verify the total before choosing a larger initial batch.",
+                "Executor 总核数未知，请先确认核数上限，再选择更大的初始分区数。");
+        put("The current value already reaches the observed executor core cap; no larger value is recommended.",
+                "当前值已达到已观测 Executor 总核数上限，不再建议增大。");
+        put("Two-round sizing uses observed partitions / (1 + max(2, scaleUpFactor)); it does not guarantee two rounds or a speedup.",
+                "按实际累计探测分区数 / (1 + max(2, scaleUpFactor)) 估算两轮所需初始值；不保证两轮完成或一定加速。");
+        put("scaleUpFactor is missing; use the observed second batch instead of assuming a default.",
+                "日志缺少 scaleUpFactor，改用第二轮实际分区数作为候选，不假设默认值。");
         put("set spark.sql.adaptive.enabled=true; set spark.sql.adaptive.skewJoin.enabled=true",
                 "设置 spark.sql.adaptive.enabled=true，并设置 spark.sql.adaptive.skewJoin.enabled=true");
         put("AQE is disabled; enabling adaptive skew-join handling lets Spark split skewed partitions automatically at runtime.",
@@ -292,6 +303,10 @@ public final class ReportText {
         }
         Integer stage = f.targetStageId();
         String sid = stage == null ? "SQL" : "Stage " + stage;
+        if ("S-30".equals(f.ruleId())) {
+            return "LIMIT 实际取数 " + evidence(f, "limit.rounds") + " 轮，累计探测 "
+                    + evidence(f, "limit.scanned_partitions") + " 个分区；建议复核 spark.sql.limit.initialNumPartitions。";
+        }
         if ("S-01".equals(f.ruleId())) {
             return sid + " 存在数据倾斜：最慢 Task 约为中位数的 "
                     + ratio(evidenceDouble(f, "task_duration.max_ms"), Math.max(1.0, evidenceDouble(f, "task_duration.p50_ms")))

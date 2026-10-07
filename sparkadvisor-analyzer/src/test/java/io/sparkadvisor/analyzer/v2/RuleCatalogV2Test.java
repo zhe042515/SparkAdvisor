@@ -23,10 +23,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class RuleCatalogV2Test {
 
     @Test
-    void catalogHasStable49IdsAndEveryRuleHasAGoldenTrigger() {
+    void catalogHasStable50IdsAndEveryRuleHasAGoldenTrigger() {
         List<MetricRule> rules = RuleCatalogV2.all();
-        assertEquals(49, rules.size());
-        assertEquals(29, rules.stream().filter(r -> r.id().startsWith("S-")).count());
+        assertEquals(50, rules.size());
+        assertEquals(30, rules.stream().filter(r -> r.id().startsWith("S-")).count());
         assertEquals(18, rules.stream().filter(r -> r.id().startsWith("Q-")).count());
         assertEquals(2, rules.stream().filter(r -> r.id().startsWith("DQ-")).count());
 
@@ -36,7 +36,7 @@ class RuleCatalogV2Test {
         Set<String> actual = findings.stream().map(Finding::ruleId).collect(Collectors.toSet());
         Set<String> expected = rules.stream().map(MetricRule::id).collect(Collectors.toSet());
         Set<String> documented = new HashSet<>();
-        for (int i = 1; i <= 29; i++) documented.add(String.format("S-%02d", i));
+        for (int i = 1; i <= 30; i++) documented.add(String.format("S-%02d", i));
         for (int i = 1; i <= 18; i++) documented.add(String.format("Q-%02d", i));
         documented.add("DQ-01"); documented.add("DQ-02");
         assertEquals(documented, expected);
@@ -79,6 +79,8 @@ class RuleCatalogV2Test {
     @Test
     void capabilityMissingSkipsRuleInsteadOfTreatingMissingMetricsAsZero() {
         MetricsContext noPlanCapability = MetricsContext.builder(RuleScope.SQL)
+                .number("limit.rounds", 3).number("limit.initial_partitions", 1).number("limit.scanned_partitions", 25)
+                .number("limit.scale_up_factor", 4).number("limit.executor_cores", 32).number("limit.second_round_partitions", 4)
                 .number("scan.files", 6000).number("scan.bytes", 1024).build();
         RuleRunResult run = RuleEngineV2.sqlDefaults(RuleThresholdsV2.defaults())
                 .evaluateDetailed(Collections.singletonList(noPlanCapability));
@@ -157,6 +159,8 @@ class RuleCatalogV2Test {
                 .attribute("plan.has_shj", "false").attribute("plan.partition_filters_empty", "true")
                 .attribute("aqe.changed_plan", "true").attribute("plan.has_cartesian", "true")
                 .attribute("plan.has_bnlj", "true").attribute("baseline.plan_changed", "true")
+                .number("limit.rounds", 3).number("limit.initial_partitions", 1).number("limit.scanned_partitions", 25)
+                .number("limit.scale_up_factor", 4).number("limit.executor_cores", 32).number("limit.second_round_partitions", 4)
                 .number("scan.files", 6000).number("scan.bytes", 6000L * 1024L * 1024L)
                 .number("output.files", 1000).number("output.bytes", 1024L * 1024L * 1024L)
                 .number("queue.wait_ratio", 0.60).number("queue.busy_ratio", 0.95)

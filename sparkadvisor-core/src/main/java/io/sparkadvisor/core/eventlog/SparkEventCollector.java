@@ -4,6 +4,7 @@ import io.sparkadvisor.core.locate.StatementIdExtractor;
 import io.sparkadvisor.core.metrics.MetricDistributionBuilder;
 import io.sparkadvisor.core.model.ApplicationModel;
 import io.sparkadvisor.core.model.Job;
+import io.sparkadvisor.core.model.LimitProbe;
 import io.sparkadvisor.core.model.SqlExecution;
 import io.sparkadvisor.core.model.Stage;
 import io.sparkadvisor.core.model.TaskInterval;
@@ -85,6 +86,7 @@ public final class SparkEventCollector extends SparkListener {
 
     private final List<ExecutorEvent> executorEvents = new ArrayList<>();
     private final Map<String, Integer> executorCores = new HashMap<>(); // executorId -> cores
+    private long activeExecutorCores;
 
     public SparkEventCollector() {
         this(false);
@@ -123,7 +125,10 @@ public final class SparkEventCollector extends SparkListener {
     public void onExecutorAdded(SparkListenerExecutorAdded e) {
         // VERIFY@3.5.1: e.time():long, e.executorId():String, e.executorInfo().totalCores():int
         int cores = e.executorInfo().totalCores();
-        executorCores.put(e.executorId(), cores);
+        Integer previous = executorCores.put(e.executorId(), cores);
+        if (!"driver".equals(e.executorId())) {
+            activeExecutorCores += cores - (previous == null ? 0L : previous.longValue());
+        }
         executorEvents.add(new ExecutorEvent(e.time(), cores, true));
     }
 
@@ -132,6 +137,7 @@ public final class SparkEventCollector extends SparkListener {
         // VERIFY@3.5.1: e.time():long, e.executorId():String
         Integer cores = executorCores.remove(e.executorId());
         if (cores != null) {
+            if (!"driver".equals(e.executorId())) activeExecutorCores -= cores;
             executorEvents.add(new ExecutorEvent(e.time(), cores, false));
         }
     }
@@ -144,7 +150,7 @@ public final class SparkEventCollector extends SparkListener {
         Long sqlId = ScalaInterop.sqlExecutionId(e.properties());
         // stageIds: Scala Seq[Object]; convert to Java List<Integer>
         List<Integer> stageIds = ScalaInterop.intSeq(e.stageIds());
-        jobs.add(new Job(e.jobId(), sqlId, stageIds, e.time(), 0L, false));
+        jobs.add(new Job(e.jobId(), sqlId, stageIds, e.time(), 0L, false, limitProbe(e, sqlId)));
         if (sqlId != null) {
             sqlExecs.computeIfAbsent(sqlId, SqlExecBuilder::new).jobIds.add((long) e.jobId());
             for (Integer stageId : stageIds) {
@@ -160,7 +166,7 @@ public final class SparkEventCollector extends SparkListener {
             if (j.jobId() == e.jobId() && j.completionTime() == 0L) {
                 boolean failed = !e.jobResult().getClass().getName().contains("JobSucceeded");
                 jobs.set(i, new Job(j.jobId(), j.sqlExecutionId(), j.stageIds(),
-                        j.submissionTime(), e.time(), failed));
+                        j.submissionTime(), e.time(), failed, j.limitProbe()));
                 break;
             }
         }
@@ -176,6 +182,31 @@ public final class SparkEventCollector extends SparkListener {
         b.parentStageIds = ScalaInterop.intSeq(info.parentIds());
         // submissionTime is Option[Long]
         b.submissionTime = ScalaInterop.optLong(info.submissionTime());
+    }
+
+    private LimitProbe limitProbe(SparkListenerJobStart event, Long sqlId) {
+        // VERIFY@3.5.6: one ResultStage per simple executeTake job; rddInfos.head is its RDD.
+        // Store scalars only. No extra TaskEnd work and no full properties/RDD object retention.
+        SqlExecBuilder sql = sqlId == null ? null : sqlExecs.get(sqlId);
+        if (sql == null || !sql.physicalPlanText.contains("CollectLimit") || event.stageInfos().size() != 1) return null;
+        StageInfo stage = event.stageInfos().apply(0);
+        if (stage.attemptNumber() != 0 || !stage.parentIds().isEmpty() || stage.rddInfos().isEmpty()) return null;
+        org.apache.spark.storage.RDDInfo rdd = stage.rddInfos().apply(0);
+        return new LimitProbe(rdd.id(), rdd.numPartitions(), stage.numTasks(),
+                limitConfig(event.properties(), LimitProbe.INITIAL_PARTITIONS),
+                limitConfig(event.properties(), LimitProbe.SCALE_UP_FACTOR),
+                (int) Math.min(Integer.MAX_VALUE, Math.max(0L, activeExecutorCores)));
+    }
+
+    private static int limitConfig(java.util.Properties properties, String key) {
+        String value = properties == null ? null : properties.getProperty(key);
+        if (value == null) return 0;
+        try {
+            int parsed = Integer.parseInt(value.trim());
+            return parsed > 0 ? parsed : -1;
+        } catch (NumberFormatException invalid) {
+            return -1;
+        }
     }
 
     @Override
@@ -285,6 +316,8 @@ public final class SparkEventCollector extends SparkListener {
         SparkListenerSQLExecutionEnd s = SqlEventAccess.sqlExecutionEnd(event);
         SqlExecBuilder b = sqlExecs.computeIfAbsent(s.executionId(), SqlExecBuilder::new);
         b.endTime = s.time();
+        // VERIFY@3.5.6: nonempty errorMessage denotes a failed SQL, even if earlier jobs succeeded.
+        b.failed = s.errorMessage().isDefined() && !s.errorMessage().get().isEmpty();
     }
 
     private void handleThriftOpStart(SparkListenerEvent event) {
@@ -316,7 +349,7 @@ public final class SparkEventCollector extends SparkListener {
             boolean execIncomplete = b.startTime == 0L || b.endTime == 0L;
             execList.add(new SqlExecution(
                     b.executionId, b.statementId, b.description, b.physicalPlanText,
-                    b.startTime, b.endTime, execIncomplete, Java8Collections.listCopy(b.jobIds)));
+                    b.startTime, b.endTime, execIncomplete, Java8Collections.listCopy(b.jobIds), b.failed));
         }
         List<Stage> stageList = new ArrayList<>();
         for (StageBuilder b : stages.values()) {
@@ -338,6 +371,7 @@ public final class SparkEventCollector extends SparkListener {
         String physicalPlanText = "";
         long startTime = 0L;
         long endTime = 0L;
+        boolean failed;
         final List<Long> jobIds = new ArrayList<>();
 
         SqlExecBuilder(long executionId) {

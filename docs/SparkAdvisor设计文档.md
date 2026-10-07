@@ -1,5 +1,7 @@
 # SparkAdvisor 设计文档
 
+> 当前主分支继续使用本文原架构，目标 Spark 版本为 **3.5.6**。新增 S-30：LIMIT 实际取数超过 2 轮时建议增大 `spark.sql.limit.initialNumPartitions`，候选结合本次累计探测分区和 `scaleUpFactor` 计算，并以当时 Executor 总核数封顶。具体公式、缺失数据处理和测试要求见 [规则规范 S-30](rules.md)。现有 AQE 与其他规则保留；不迁入精简分支的新架构。
+
 | 项 | 内容 |
 |---|---|
 | 文档版本 | v2.0（合并版） |
